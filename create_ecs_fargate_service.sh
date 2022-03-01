@@ -28,13 +28,16 @@ ALB_SECURITY_GROUP_ID=sg-07c21f84ea73964f4
 ECS_SECURITY_GROUP_ID=sg-0a8d728362bb52ef8
 
 
-DOCKER_IMAGE_URL=630394441504.dkr.ecr.eu-central-1.amazonaws.com/gattaca:e864825d496a108bc39fbf75e1b6d1d68c604e79
 
 #############
 #
 # RESOURCE CREATION
 #
 #############
+
+
+aws ecr create-repository --repository-name ${APPLICATION_NAME}
+DOCKER_IMAGE_URL=${AWS_ID}.dkr.ecr.eu-central-1.amazonaws.com/${APPLICATION_NAME}
 
 # create the ECS cluster
 aws ecs create-cluster --cluster-name ${CLUSTER_NAME}
