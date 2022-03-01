@@ -43,13 +43,21 @@ DOCKER_IMAGE_URL=${AWS_ID}.dkr.ecr.eu-central-1.amazonaws.com/${APPLICATION_NAME
 aws ecs create-cluster --cluster-name ${CLUSTER_NAME}
 
 
+# TODO -- may be create the role via aws cli?
+ECS_TASK_EXECUTION_ROLE=ecsTaskExecutionRoleGattaca
+
+AWS_REGION=${AWS_REGION:-"eu-central-1"}
+
 CONTAINER_CPU=1024
+CONTAINER_CPU_HARD=512
 CONTAINER_RAM=2048
+CONTAINER_RAM_HARD=1024
 CONTAINER_PORT=8080
 # create the task defintion to define which image to run, where (Fargate), and with which ports exposed
 cat > task_definition.json << EOF
 {
     "family": "${APPLICATION_NAME}",
+    "executionRoleArn": "arn:aws:iam::${AWS_ID}:role/${ECS_TASK_EXECUTION_ROLE}",
     "networkMode": "awsvpc",
     "requiresCompatibilities": [
         "FARGATE"
@@ -60,6 +68,8 @@ cat > task_definition.json << EOF
         {
             "name": "${APPLICATION_NAME}",
             "image": "${DOCKER_IMAGE_URL}",
+            "cpu": ${CONTAINER_CPU_HARD},
+            "memory": ${CONTAINER_RAM_HARD},
             "portMappings": [
                 {
                     "containerPort": ${CONTAINER_PORT},
@@ -70,10 +80,9 @@ cat > task_definition.json << EOF
             "essential": true,
             "logConfiguration": {
                 "logDriver": "awslogs",
-                "secretOptions": null,
                 "options": {
                     "awslogs-group": "/ecs/${APPLICATION_NAME}",
-                    "awslogs-region": "eu-central-1",
+                    "awslogs-region": "${AWS_REGION}",
                     "awslogs-stream-prefix": "ecs-${APPLICATION_NAME}"
                 }
             }
