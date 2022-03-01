@@ -96,13 +96,13 @@ aws ecs register-task-definition --cli-input-json file://"$(pwd)"/task-definitio
 # create the target group for the loadbalancer,
 # registration of actual targets is then done by ECS
 aws elbv2 create-target-group --name ecs-${APPLICATION_NAME}-tg --protocol HTTP --port ${CONTAINER_PORT} --vpc-id ${VPC_ID} --target-type ip
-ALB_TG_ARN=$(aws elbv2 describe-target-groups --names ecs-gattaca-service-private | jq -r '.TargetGroups[].TargetGroupArn')
+ALB_TG_ARN=$(aws elbv2 describe-target-groups --names ecs-${APPLICATION_NAME}-tg | jq -r '.TargetGroups[].TargetGroupArn')
 
 # create ALB (internet facing, with HTTP listener)
 # technically one could now also just get all the public subnets from the vpc id... but skipping here
 aws elbv2 create-load-balancer --name ${APPLICATION_NAME}-alb --subnets ${PUBLIC_SUBNET_1_ID} ${PUBLIC_SUBNET_2_ID} --security-groups ${ALB_SECURITY_GROUP_ID} --scheme internet-facing
-ALB_ARN=$(aws elbv2 describe-load-balancers --names gattaca-service-2 | jq -r '.LoadBalancers[].LoadBalancerArn')
-ALB_DNS=$(aws elbv2 describe-load-balancers --names gattaca-service-2 | jq -r '.LoadBalancers[].DNSName')
+ALB_ARN=$(aws elbv2 describe-load-balancers --names ${APPLICATION_NAME}-alb | jq -r '.LoadBalancers[].LoadBalancerArn')
+ALB_DNS=$(aws elbv2 describe-load-balancers --names ${APPLICATION_NAME}-alb | jq -r '.LoadBalancers[].DNSName')
 
 # create the listener and associate target group with LB
 # here we assume that we use HTTP on the LB, not HTTPS
