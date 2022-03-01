@@ -6,6 +6,7 @@
 #
 ###############
 
+AWS_ID=630394441504
 
 APPLICATION_NAME=gattaca
 CLUSTER_NAME=gattaca
