@@ -34,7 +34,9 @@ ECS_SECURITY_GROUP_ID=sg-0b5ef4c2a828f02ac
 # RESOURCE CREATION
 #
 #############
-
+# create log group
+aws logs create-log-group --log-group-name "/ecs/${APPLICATION_NAME}"
+aws logs put-retention-policy --log-group-name "/ecs/${APPLICATION_NAME}" --retention-in-days 7
 
 aws ecr create-repository --repository-name ${APPLICATION_NAME}
 DOCKER_IMAGE_URL=${AWS_ID}.dkr.ecr.eu-central-1.amazonaws.com/${APPLICATION_NAME}
