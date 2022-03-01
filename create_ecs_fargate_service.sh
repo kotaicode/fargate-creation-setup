@@ -11,7 +11,8 @@ AWS_ID=630394441504
 APPLICATION_NAME=gattaca
 CLUSTER_NAME=gattaca
 
-# create a dedicated VPC with private and public subnets as in: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-public-private-vpc.html
+# create a dedicated VPC with private and public subnets as in:
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-public-private-vpc.html
 VPC_ID=vpc-07ae7c96be5864174
 
 PUBLIC_SUBNET_1_ID=subnet-059104a34cdc3272b
@@ -83,7 +84,7 @@ aws ecs register-task-definition --cli-input-json file://"$(pwd)"/task_definitio
 # create the target group for the loadbalancer,
 # registration of actual targets is then done by ECS
 aws elbv2 create-target-group --name ecs-${APPLICATION_NAME}-tg --protocol HTTP --port ${CONTAINER_PORT} --vpc-id ${VPC_ID} --target-type ip
-ALB_TG_ARN=$(aws elbv2 describe-target-groups --names ecs-gattaca-service-private|jq -r '.TargetGroups[].TargetGroupArn')
+ALB_TG_ARN=$(aws elbv2 describe-target-groups --names ecs-gattaca-service-private | jq -r '.TargetGroups[].TargetGroupArn')
 
 # create ALB (internet facing, with HTTP listener)
 # technically one could now also just get all the public subnets from the vpc id... but skipping here
@@ -121,4 +122,4 @@ cat > service.json << EOF
 EOF
 aws ecs create-service --cluster ${CLUSTER_NAME} --service-name ${APPLICATION_NAME}-service --cli-input-json file://"$(pwd)"/service.json
 
-echo "application ready at DNS: ${ALB_DNS}" 
+echo "application ready at DNS: ${ALB_DNS}"
