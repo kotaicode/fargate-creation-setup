@@ -27,9 +27,6 @@ ALB_SECURITY_GROUP_ID=sg-07c21f84ea73964f4
 # the same for your ECS service, it is recommended to have a separate SG for it, which opens the connection to the container port
 ECS_SECURITY_GROUP_ID=sg-0a8d728362bb52ef8
 
-CONTAINER_CPU=1024
-CONTAINER_RAM=2048
-CONTAINER_PORT=8080
 
 DOCKER_IMAGE_URL=630394441504.dkr.ecr.eu-central-1.amazonaws.com/gattaca:e864825d496a108bc39fbf75e1b6d1d68c604e79
 
@@ -43,6 +40,9 @@ DOCKER_IMAGE_URL=630394441504.dkr.ecr.eu-central-1.amazonaws.com/gattaca:e864825
 aws ecs create-cluster --cluster-name ${CLUSTER_NAME}
 
 
+CONTAINER_CPU=1024
+CONTAINER_RAM=2048
+CONTAINER_PORT=8080
 # create the task defintion to define which image to run, where (Fargate), and with which ports exposed
 cat > task_definition.json << EOF
 {
