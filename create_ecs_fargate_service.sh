@@ -54,7 +54,7 @@ CONTAINER_RAM=2048
 CONTAINER_RAM_HARD=1024
 CONTAINER_PORT=8080
 # create the task defintion to define which image to run, where (Fargate), and with which ports exposed
-cat > task_definition.json << EOF
+cat > task-definition.json << EOF
 {
     "family": "${APPLICATION_NAME}",
     "executionRoleArn": "arn:aws:iam::${AWS_ID}:role/${ECS_TASK_EXECUTION_ROLE}",
@@ -91,7 +91,7 @@ cat > task_definition.json << EOF
 }
 EOF
 
-aws ecs register-task-definition --cli-input-json file://"$(pwd)"/task_definition.json
+aws ecs register-task-definition --cli-input-json file://"$(pwd)"/task-definition.json
 
 # create the target group for the loadbalancer,
 # registration of actual targets is then done by ECS
