@@ -25,7 +25,7 @@ PRIVATE_SUBNET_2_ID=subnet-0364653c4db27ae96
 ALB_SECURITY_GROUP_ID=sg-07c21f84ea73964f4
 
 # the same for your ECS service, it is recommended to have a separate SG for it, which opens the connection to the container port
-ECS_SECURITY_GROUP_ID=sg-0a8d728362bb52ef8
+ECS_SECURITY_GROUP_ID=sg-0b5ef4c2a828f02ac
 
 
 
