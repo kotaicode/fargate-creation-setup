@@ -1,31 +1,136 @@
 #!/bin/bash
 
+# https://stackoverflow.com/a/2871034 👇
+set -euxo pipefail
+
+
+[ $# -eq 6 ] || echo "Usage: $0 AWSID CLUSTERNAME APPLICATIONNAME PORT CERTIFICATENAME TASKSNUMBER"
+[ $# -eq 6 ] || exit 1
+
+jq --help > /dev/null || echo "You need to install jq to run this script"
+jq --help > /dev/null || exit 1
+
 ###############
 #
 # CONFIG
 #
 ###############
 
-AWS_ID=630394441504
+# TODO AWSID and PORT must be numbers, and PORT is < 65536 (add
+# validations in future)
+AWS_ID=$1
+CLUSTER_NAME=$2
+APPLICATION_NAME=$3
+APPLICATIONPORT=$4
+CERTIFICATE_NAME=$5
+TASKS_NUMBER=$6
 
-APPLICATION_NAME=gattaca
-CLUSTER_NAME=gattaca
+VPC_NAME=ecs-cluster-${CLUSTER_NAME}
 
-# create a dedicated VPC with private and public subnets as in:
-# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/create-public-private-vpc.html
-VPC_ID=vpc-07ae7c96be5864174
+INTERNET_GATEWAY_NAME=${VPC_NAME}
 
-PUBLIC_SUBNET_1_ID=subnet-059104a34cdc3272b
-PUBLIC_SUBNET_2_ID=subnet-05a08acf089c9b7b0
-PRIVATE_SUBNET_1_ID=subnet-04351a7d979611951
-PRIVATE_SUBNET_2_ID=subnet-0364653c4db27ae96
+ALB_SECURITY_GROUP_NAME=${VPC_NAME}-alb-sg
+ECS_SECURITY_GROUP_NAME=${VPC_NAME}-ecs-sg
 
-# generate the SG using aws ec2 create-security-group --description allow-http --group-name allow-http --vpc-id ${VPC_ID}
-# then add the security group rules to allow access on port 80 and 443 depending on how you expose your loadbalancer
-ALB_SECURITY_GROUP_ID=sg-07c21f84ea73964f4
+WAIT_FOR_NAT_CREATION=""
 
-# the same for your ECS service, it is recommended to have a separate SG for it, which opens the connection to the container port
-ECS_SECURITY_GROUP_ID=sg-0b5ef4c2a828f02ac
+#############################
+# GET DETAILS OF THE CLUSTER
+#############################
+
+VPC_ID=$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=${VPC_NAME} --query Vpcs[0].VpcId --output text)
+
+# If vpc id is missing, we should just create everything anyway.
+if [[ "${VPC_ID}" == *"None"* ]]; then
+
+    VPC_ID=$(aws ec2 create-vpc --cidr-block 172.32.0.0/16 --instance-tenancy default --tag-specification "ResourceType=vpc,Tags=[{Key=Name,Value=${VPC_NAME}}]" --query Vpc.VpcId --output text)
+    aws ec2 modify-vpc-attribute --vpc-id ${VPC_ID} --enable-dns-support "{\"Value\":true}"
+
+    INTERNET_GATEWAY_ID=$(aws ec2 create-internet-gateway --tag-specification "ResourceType=internet-gateway,Tags=[{Key=Name,Value=${VPC_NAME}}]" --query InternetGateway.InternetGatewayId --output text)
+    aws ec2 attach-internet-gateway --vpc-id ${VPC_ID} --internet-gateway-id ${INTERNET_GATEWAY_ID}
+
+    ROUTE_TABLE_ID=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${VPC_NAME}}]" --query RouteTable.RouteTableId --output text)
+    aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
+
+    PRIVATE_SUBNET_1_ID=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.32.0.0/20 --availability-zone eu-central-1a --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${VPC_NAME}-private}]" --query Subnet.SubnetId --output text)
+    PRIVATE_SUBNET_2_ID=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.32.16.0/20 --availability-zone eu-central-1b --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${VPC_NAME}-private}]" --query Subnet.SubnetId --output text)
+
+    PUBLIC_SUBNET_1_ID=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.32.32.0/20 --availability-zone eu-central-1a --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${VPC_NAME}-public}]" --query Subnet.SubnetId --output text)
+    aws ec2 associate-route-table --subnet-id ${PUBLIC_SUBNET_1_ID} --route-table-id ${ROUTE_TABLE_ID}
+    aws ec2 modify-subnet-attribute --subnet-id ${PUBLIC_SUBNET_1_ID} --map-public-ip-on-launch
+
+    PUBLIC_SUBNET_2_ID=$(aws ec2 create-subnet --vpc-id ${VPC_ID} --cidr-block 172.32.48.0/20 --availability-zone eu-central-1b --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${VPC_NAME}-public}]" --query Subnet.SubnetId --output text)
+    aws ec2 associate-route-table --subnet-id ${PUBLIC_SUBNET_2_ID} --route-table-id ${ROUTE_TABLE_ID}
+    aws ec2 modify-subnet-attribute --subnet-id ${PUBLIC_SUBNET_2_ID} --map-public-ip-on-launch
+
+    MAIN_VPC_ROUTE_TABLE=$(aws ec2 describe-route-tables --filters Name=vpc-id,Values=${VPC_ID} Name=association.main,Values=true --query "RouteTables[0].RouteTableId" --output text)
+    aws ec2 associate-route-table --route-table-id ${MAIN_VPC_ROUTE_TABLE} --subnet-id ${PRIVATE_SUBNET_1_ID}
+    aws ec2 associate-route-table --route-table-id ${MAIN_VPC_ROUTE_TABLE} --subnet-id ${PRIVATE_SUBNET_2_ID}
+    ELASTIC_IP_1=$(aws ec2 allocate-address --query AllocationId --output text)
+    NAT_ID_1=$(aws ec2 create-nat-gateway --subnet-id ${PUBLIC_SUBNET_1_ID} --allocation-id ${ELASTIC_IP_1} --tag-specifications "ResourceType=natgateway,Tags=[{Key=Name,Value=${VPC_NAME}}]" --query NatGateway.NatGatewayId --output text)
+    # This command wont work till nat gateway is completely created
+    WAIT_FOR_NAT_CREATION="aws ec2 create-route --route-table-id ${MAIN_VPC_ROUTE_TABLE} --destination-cidr-block 0.0.0.0/0 --nat-gateway-id ${NAT_ID_1}"
+    #TODO Wait while NAT_STATE is pending. We want available.
+    #NAT_STATE=$(aws ec2 describe-nat-gateways --query "NatGateways[?NatGatewayId=='nat-04fde583db9ad1f68'].State | [0]" --output text)
+
+    ALB_SECURITY_GROUP_ID=$(aws ec2 create-security-group --description allow-http --group-name ${ALB_SECURITY_GROUP_NAME} --vpc-id ${VPC_ID} --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${VPC_NAME}-alb-sg}]" --query GroupId  --output text)
+    aws ec2 authorize-security-group-ingress --group-id ${ALB_SECURITY_GROUP_ID} --protocol tcp --port 80 --cidr 0.0.0.0/0
+    aws ec2 authorize-security-group-ingress --group-id ${ALB_SECURITY_GROUP_ID} --protocol tcp --port 443 --cidr 0.0.0.0/0
+
+    ECS_SECURITY_GROUP_ID=$(aws ec2 create-security-group --description allow-http --group-name ${ECS_SECURITY_GROUP_NAME} --vpc-id ${VPC_ID} --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${VPC_NAME}-ecs-sg}]" --query GroupId --output text)
+    aws ec2 authorize-security-group-ingress  --group-id  ${ECS_SECURITY_GROUP_ID} --protocol tcp --port 0-65535  --source-group ${ALB_SECURITY_GROUP_ID}
+
+    aws ecs create-cluster --cluster-name ${CLUSTER_NAME}
+
+fi
+
+# Let's read them all nicely (should we try to read and create if fail for EVERY item?)
+ALB_SECURITY_GROUP_ID=$(aws ec2 describe-security-groups --query "SecurityGroups[?GroupName=='${ALB_SECURITY_GROUP_NAME}'].GroupId | [0]" --output text)
+ECS_SECURITY_GROUP_ID=$(aws ec2 describe-security-groups --query "SecurityGroups[?GroupName=='${ECS_SECURITY_GROUP_NAME}'].GroupId | [0]" --output text)
+
+PRIVATE_SUBNET_1_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=${VPC_ID} Name=cidr-block,Values=172.32.0.0/20 --query "Subnets[0].SubnetId" --output text)
+PRIVATE_SUBNET_2_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=${VPC_ID} Name=cidr-block,Values=172.32.16.0/20 --query "Subnets[0].SubnetId" --output text)
+
+PUBLIC_SUBNET_1_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=${VPC_ID} Name=cidr-block,Values=172.32.32.0/20 --query "Subnets[0].SubnetId" --output text)
+PUBLIC_SUBNET_2_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=${VPC_ID} Name=cidr-block,Values=172.32.48.0/20 --query "Subnets[0].SubnetId" --output text)
+
+INTERNET_GATEWAY_ID=$(aws ec2 describe-internet-gateways --filters Name=tag:Name,Values=${INTERNET_GATEWAY_NAME} --query InternetGateways[0].InternetGatewayId --output text)
+
+CERTIFICATE_ARN=$(aws iam list-server-certificates --query "ServerCertificateMetadataList[?ServerCertificateName=='${CERTIFICATE_NAME}'].Arn | [0]" --output text)
+
+ROLEMUSTBECREATED=
+aws iam list-roles | grep ecsTaskExecutionRole || ROLEMUSTBECREATED="true"
+if [ ! -z ${ROLEMUSTBECREATED} ]; then
+    cat > ecs-role-definition.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ecs-tasks.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+    aws iam --region us-west-2 create-role --role-name ecsTaskExecutionRole --assume-role-policy-document file://ecs-role-definition.json
+    aws iam --region us-west-2 attach-role-policy --role-name ecsTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+fi
+
+ECS_TASK_EXECUTION_ROLE_ARN=$(aws iam get-role --role-name ecsTaskExecutionRole --query "Role.Arn" --output text)
+
+VARMISSING=
+[ -z $ALB_SECURITY_GROUP_ID ]           && echo "ALB_SECURITY_GROUP_ID is empty " && VARMISSING="true"
+[ -z $ECS_SECURITY_GROUP_ID ]           && echo "ECS_SECURITY_GROUP_ID is empty " && VARMISSING="true"
+[ -z $PRIVATE_SUBNET_1_ID ]             && echo "PRIVATE_SUBNET_1_ID is empty   " && VARMISSING="true"
+[ -z $PRIVATE_SUBNET_2_ID ]             && echo "PRIVATE_SUBNET_2_ID is empty   " && VARMISSING="true"
+[ -z $PUBLIC_SUBNET_1_ID ]              && echo "PUBLIC_SUBNET_1_ID is empty    " && VARMISSING="true"
+[ -z $PUBLIC_SUBNET_2_ID ]              && echo "PUBLIC_SUBNET_2_ID is empty    " && VARMISSING="true"
+[ -z $ECS_TASK_EXECUTION_ROLE_ARN ]     && echo "ECS_TASK_EXECUTION_ROLE_ARN is empty    " && VARMISSING="true"
+[ -z $VARMISSING ] || exit 1
 
 
 
@@ -34,32 +139,26 @@ ECS_SECURITY_GROUP_ID=sg-0b5ef4c2a828f02ac
 # RESOURCE CREATION
 #
 #############
+
 # create log group
-aws logs create-log-group --log-group-name "/ecs/${APPLICATION_NAME}"
-aws logs put-retention-policy --log-group-name "/ecs/${APPLICATION_NAME}" --retention-in-days 7
+aws logs create-log-group --log-group-name "/ecs/${APPLICATION_NAME}-${CLUSTER_NAME}"
+aws logs put-retention-policy --log-group-name "/ecs/${APPLICATION_NAME}-${CLUSTER_NAME}" --retention-in-days 7
+aws ecr create-repository --repository-name ${APPLICATION_NAME}-${CLUSTER_NAME}
 
-aws ecr create-repository --repository-name ${APPLICATION_NAME}
-DOCKER_IMAGE_URL=${AWS_ID}.dkr.ecr.eu-central-1.amazonaws.com/${APPLICATION_NAME}
-
-# create the ECS cluster
-aws ecs create-cluster --cluster-name ${CLUSTER_NAME}
-
-
-# TODO -- may be create the role via aws cli?
-ECS_TASK_EXECUTION_ROLE=ecsTaskExecutionRoleGattaca
+DOCKER_IMAGE_URL=${AWS_ID}.dkr.ecr.eu-central-1.amazonaws.com/${APPLICATION_NAME}-${CLUSTER_NAME}:latest
 
 AWS_REGION=${AWS_REGION:-"eu-central-1"}
-
 CONTAINER_CPU=1024
 CONTAINER_CPU_HARD=512
 CONTAINER_RAM=2048
 CONTAINER_RAM_HARD=1024
-CONTAINER_PORT=8080
-# create the task defintion to define which image to run, where (Fargate), and with which ports exposed
+CONTAINER_PORT=${APPLICATIONPORT}
+
+# create the task definition to define which image to run, where (Fargate), and with which ports exposed
 cat > task-definition.json << EOF
 {
-    "family": "${APPLICATION_NAME}",
-    "executionRoleArn": "arn:aws:iam::${AWS_ID}:role/${ECS_TASK_EXECUTION_ROLE}",
+    "family": "${APPLICATION_NAME}-${CLUSTER_NAME}",
+    "executionRoleArn": "${ECS_TASK_EXECUTION_ROLE_ARN}",
     "networkMode": "awsvpc",
     "requiresCompatibilities": [
         "FARGATE"
@@ -68,7 +167,7 @@ cat > task-definition.json << EOF
     "memory": "${CONTAINER_RAM}",
     "containerDefinitions": [
         {
-            "name": "${APPLICATION_NAME}",
+            "name": "${APPLICATION_NAME}-${CLUSTER_NAME}",
             "image": "${DOCKER_IMAGE_URL}",
             "cpu": ${CONTAINER_CPU_HARD},
             "memory": ${CONTAINER_RAM_HARD},
@@ -83,9 +182,9 @@ cat > task-definition.json << EOF
             "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
-                    "awslogs-group": "/ecs/${APPLICATION_NAME}",
+                    "awslogs-group": "/ecs/${APPLICATION_NAME}-${CLUSTER_NAME}",
                     "awslogs-region": "${AWS_REGION}",
-                    "awslogs-stream-prefix": "ecs-${APPLICATION_NAME}"
+                    "awslogs-stream-prefix": "ecs-${APPLICATION_NAME}-${CLUSTER_NAME}"
                 }
             }
         }
@@ -93,47 +192,45 @@ cat > task-definition.json << EOF
 }
 EOF
 
-aws ecs register-task-definition --cli-input-json file://"$(pwd)"/task-definition.json
+TASK_REVISION_NUMBER=$(aws ecs register-task-definition --cli-input-json file://"$(pwd)"/task-definition.json --query "taskDefinition.revision" --output text)
 
 # create the target group for the loadbalancer,
 # registration of actual targets is then done by ECS
-aws elbv2 create-target-group --name ecs-${APPLICATION_NAME}-tg --protocol HTTP --port ${CONTAINER_PORT} --vpc-id ${VPC_ID} --target-type ip
-ALB_TG_ARN=$(aws elbv2 describe-target-groups --names ecs-${APPLICATION_NAME}-tg | jq -r '.TargetGroups[].TargetGroupArn')
+aws elbv2 create-target-group --name ecs-${APPLICATION_NAME}-${CLUSTER_NAME}-tg --protocol HTTP --port ${CONTAINER_PORT} --vpc-id ${VPC_ID} --target-type ip
+ALB_TG_ARN=$(aws elbv2 describe-target-groups --names ecs-${APPLICATION_NAME}-${CLUSTER_NAME}-tg | jq -r '.TargetGroups[].TargetGroupArn')
 
 # create ALB (internet facing, with HTTP listener)
-# technically one could now also just get all the public subnets from the vpc id... but skipping here
-aws elbv2 create-load-balancer --name ${APPLICATION_NAME}-alb --subnets ${PUBLIC_SUBNET_1_ID} ${PUBLIC_SUBNET_2_ID} --security-groups ${ALB_SECURITY_GROUP_ID} --scheme internet-facing
-ALB_ARN=$(aws elbv2 describe-load-balancers --names ${APPLICATION_NAME}-alb | jq -r '.LoadBalancers[].LoadBalancerArn')
-ALB_DNS=$(aws elbv2 describe-load-balancers --names ${APPLICATION_NAME}-alb | jq -r '.LoadBalancers[].DNSName')
+aws elbv2 create-load-balancer --name ${APPLICATION_NAME}-${CLUSTER_NAME}-alb --subnets ${PUBLIC_SUBNET_1_ID} ${PUBLIC_SUBNET_2_ID} --security-groups ${ALB_SECURITY_GROUP_ID} --scheme internet-facing
+ALB_ARN=$(aws elbv2 describe-load-balancers --names ${APPLICATION_NAME}-${CLUSTER_NAME}-alb | jq -r '.LoadBalancers[].LoadBalancerArn')
+ALB_DNS=$(aws elbv2 describe-load-balancers --names ${APPLICATION_NAME}-${CLUSTER_NAME}-alb | jq -r '.LoadBalancers[].DNSName')
 
 # create the listener and associate target group with LB
-# here we assume that we use HTTP on the LB, not HTTPS
-aws elbv2 create-listener --load-balancer-arn ${ALB_ARN} --protocol HTTP --port 80 --default-actions Type=forward,TargetGroupArn=${ALB_TG_ARN}
-
+aws elbv2 create-listener --load-balancer-arn ${ALB_ARN} --protocol HTTPS --port 443 --certificates CertificateArn=$CERTIFICATE_ARN --ssl-policy ELBSecurityPolicy-2016-08 --default-actions Type=forward,TargetGroupArn=${ALB_TG_ARN}
 # create the ECS service and connect it to the created target group
 # this takes care of registering the then running containers from the task to the target group
 cat > service.json << EOF
 {
-    "serviceName": "${APPLICATION_NAME}",
-    "taskDefinition": "${APPLICATION_NAME}:1",
+    "serviceName": "${APPLICATION_NAME}-${CLUSTER_NAME}",
+    "taskDefinition": "${APPLICATION_NAME}-${CLUSTER_NAME}:${TASK_REVISION_NUMBER}",
     "loadBalancers": [
         {
             "targetGroupArn": "${ALB_TG_ARN}",
-            "containerName": "${APPLICATION_NAME}",
+            "containerName": "${APPLICATION_NAME}-${CLUSTER_NAME}",
             "containerPort": ${CONTAINER_PORT}
         }
     ],
     "networkConfiguration": {
         "awsvpcConfiguration": {
-            "assignPublicIp": "ENABLED",
+            "assignPublicIp": "DISABLED",
             "securityGroups": ["${ECS_SECURITY_GROUP_ID}"],
             "subnets": ["${PRIVATE_SUBNET_1_ID}", "${PRIVATE_SUBNET_2_ID}"]
         }
     },
-    "desiredCount": 2,
+    "desiredCount": ${TASKS_NUMBER},
     "launchType": "FARGATE"
 }
 EOF
-aws ecs create-service --cluster ${CLUSTER_NAME} --service-name ${APPLICATION_NAME}-service --cli-input-json file://"$(pwd)"/service.json
 
+aws ecs create-service --cluster ${CLUSTER_NAME} --service-name ${APPLICATION_NAME}-${CLUSTER_NAME}-service --cli-input-json file://"$(pwd)"/service.json
+echo  "run it manually after nat creation > : ${WAIT_FOR_NAT_CREATION}"
 echo "application ready at DNS: ${ALB_DNS}"
